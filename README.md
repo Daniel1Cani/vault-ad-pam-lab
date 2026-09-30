@@ -1,51 +1,51 @@
-# 🧠 Active Directory Privileged Access Management with HashiCorp Vault
+# Vault + Active Directory Privileged Access Management Lab
 
-This project demonstrates how to build an **open-source Privileged Access Management (PAM)** system using **HashiCorp Vault** integrated with **Active Directory (AD)** and **AWS Key Management Service (KMS)** for secure auto-unseal.
+An open-source PAM lab: **HashiCorp Vault** rotates the password of an **Active Directory** service account on demand, with **AWS KMS** auto-unseal. It does what CyberArk or BeyondTrust do for service accounts, using free tools.
 
-It eliminates static service passwords by allowing Vault to dynamically rotate Active Directory credentials — similar to how enterprise PAM tools like CyberArk or BeyondTrust function, but with an open-source stack that can run fully in AWS or on-prem.
+## How it works
 
+```
+ dc_admin ──LDAP login──▶ Vault (Windows Server) ──LDAPS, bind account──▶ Domain Controller (corp.local)
+                            │  read ad/creds/admins                          │
+                            │  ◀── new password set on vault-managed-admin ──┘
+                            └── AWS KMS unseals Vault after a reboot
+```
 
+1. Vault connects to AD with a low-privilege **bind account** (`svc-vault-bind`) that is only allowed to reset one account's password.
+2. An admin (`dc_admin`) logs into Vault with LDAP and reads `ad/creds/admins`.
+3. Vault resets the password of `vault-managed-admin` in AD. The old password stops working immediately.
+4. The rotation is recorded in Vault's audit trail.
 
-**Components**
+| Component | Role |
+|---|---|
+| Vault server (Windows Server) | AD secrets engine, file storage, AWS KMS auto-unseal |
+| Domain controller `DC01` | Domain `corp.local`, `ServiceAccounts` OU |
+| `svc-vault-bind` | Bind account with delegated "Reset Password" on the managed account |
+| `vault-managed-admin` | Account whose password Vault rotates (TTL or on demand) |
+| `dc_admin` | Human admin who authenticates to Vault and requests credentials |
 
-| Component | Description |
-|------------|-------------|
-| **Vault Server (Windows Server)** | Runs the Vault service with the **Active Directory Secrets Engine**. It’s configured to use **AWS KMS auto-unseal**, meaning Vault automatically decrypts its master key using AWS’s Key Management Service after reboots — no manual key entry required. |
-| **Domain Controller (DC01)** | The Active Directory domain `corp.local`, hosting organizational units and user accounts. |
-| **Bind Account (`svc-vault-bind`)** | Lightweight AD service account used by Vault to connect securely to AD via **LDAPS**. |
-| **Managed Account (`vault-managed-admin`)** | An AD service account whose password Vault dynamically rotates based on TTL or manual trigger. |
-| **Admin User (`dc_admin`)** | Authenticates to Vault via LDAP and manages secrets, roles, and rotation policies. |
-| **AWS KMS** | Provides automatic unseal for Vault using a managed encryption key, improving resilience and eliminating manual unseal steps. |
+## Repo layout
 
----
+| Path | Contents |
+|---|---|
+| [`config/`](config) | `vault.hcl` (server, KMS seal), `admins.hcl` (policy), `ad-password.hcl` (password policy) |
+| [`scripts/`](scripts) | `ad-setup.ps1` (create accounts), `delegate-reset.ps1` (grant reset rights), `vault-start.ps1`, `unseal-vault.ps1` |
+| [`screenshots/`](screenshots) | AD config, OU layout, service running, and a credential rotation (password values blacked out) |
 
-## 🔄 Credential Rotation Flow
+## Setup order
 
-1. Vault connects to AD using the **bind account** (`svc-vault-bind`).
-2. The authorized admin (`dc_admin`) logs into Vault through **LDAP authentication**.
-3. The admin reads the role `ad/creds/admins` to retrieve dynamic credentials.
-4. Vault automatically resets the password for `vault-managed-admin` in Active Directory.
-5. The old password becomes invalid immediately.
-6. Vault audit logs record the event, preserving traceability.
+1. Build a domain controller with the `corp.local` domain and a `ServiceAccounts` OU.
+2. Run `scripts/ad-setup.ps1` (prompts for passwords), then `scripts/delegate-reset.ps1`.
+3. Fill in the placeholders in `config/vault.hcl`, start Vault with `scripts/vault-start.ps1`, and initialize it.
+4. Enable the AD secrets engine, point it at `ldaps://dc01.corp.local` with the bind account, and create the `admins` role.
+5. Log in as `dc_admin` and run `vault read ad/creds/admins`. Run it twice to see the password rotate.
 
-*(See the [Screenshots branch](../../tree/Screenshots) for live examples and verification images.)*
+## Hardening (what a production setup would change)
 
----
+This is a lab and some settings are deliberately relaxed:
 
-## ⚙️ Configuration Summary
-
-The lab is composed of three configuration layers:
-
-| Layer | Purpose | Key File(s) |
-|--------|----------|-------------|
-| **Vault Core Config** | Defines listener, storage, and seal method (AWS KMS auto-unseal). | [`vault.hcl`](../../tree/Config/Vault.hcl) |
-| **AD Secrets Engine** | Connects Vault to Active Directory via LDAPS using `svc-vault-bind`. | [`ad-config.png`](../../tree/Screenshots) |
-| **Policies & Roles** | Grants access and defines which AD accounts rotate dynamically. | [`admins.hcl`](../../tree/Config/Admins.hcl) |
-
-> 🔗 Full configuration files and screenshots are documented in the [Config branch](../../tree/Config).
-
-Vault automatically:
-- Authenticates to AD via the bind account  
-- Dynamically rotates the managed account password (`vault-managed-admin`)  
-- Logs each rotation in the audit trail for traceability
-
+- The Vault listener has TLS disabled, and the AD engine was configured with `insecure_tls=true` because the lab CA is self-signed. Production: a trusted CA certificate on both.
+- The `admins` policy grants `*` with `sudo`. Production: scope it to `ad/creds/*` and the auth methods in use.
+- The bind account has `PasswordNeverExpires`. Production: rotate it too.
+- Vault runs as a single node with file storage. Production: Integrated Storage (Raft) for HA.
+- No secrets are in this repo: scripts prompt for passwords, and KMS values are placeholders.
